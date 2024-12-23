@@ -1,4 +1,4 @@
-# Blood Report Analysis and Vulnerability Prediction System
+# Blood Report Analysis and Vulnerability Prediction
 
 This project provides a comprehensive solution for processing and analyzing blood report PDFs. It extracts key health parameters, predicts potential health vulnerabilities, and generates detailed descriptions of associated health risks. The system leverages Groq AI for query-based data extraction and vulnerability prediction, with ChromaDB for document storage and efficient retrieval.
 
