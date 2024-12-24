@@ -10,14 +10,15 @@ from langchain.prompts import PromptTemplate
 from langchain_groq import ChatGroq
 import re
 import uuid
+import time
 
-from dotenv import load_dotenv
-import os
 
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Initialize ChromaDB
+def initialize_chroma():
+    client = chromadb.PersistentClient(path="./blood_db")
+    return client
 
-# Step 1: Load PDF and extract text
+# Function to load and split PDF
 def load_and_split_pdf(file_path):
     loader = PyPDFLoader(file_path)
     documents = loader.load()
@@ -28,12 +29,7 @@ def load_and_split_pdf(file_path):
     docs = text_splitter.split_documents(documents)
     return docs
 
-# Step 2: Initialize ChromaDB
-def initialize_chroma():
-    client = chromadb.PersistentClient(path="./blood_db")
-    return client
-
-# Step 3: Embed and store the documents
+# Function to store documents in ChromaDB
 def store_documents(client, docs):
     embedding = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')
     vector_store = Chroma(client=client, collection_name="blood_reports", embedding_function=embedding)
@@ -41,12 +37,8 @@ def store_documents(client, docs):
     vector_store.add_documents(documents=docs, ids=ids)
     return vector_store
 
-# Step 4: Query Groq model to extract key values
-def query_key_values(vector_store, query):
-    llm = ChatGroq(
-        api_key= GROQ_API_KEY,
-        model="llama3-8b-8192"
-    )
+# Function to query Groq model
+def query_key_values(vector_store, query, llm):
     key_values = {}
 
     for que in query:
@@ -56,87 +48,46 @@ def query_key_values(vector_store, query):
             {content}
             Provide clear output(single value in number) in key-value format."""
         )
+
         chain = LLMChain(llm=llm, prompt=prompt_template)
         results = vector_store.similarity_search(que)
         contents = "\n".join([result.page_content for result in results])
+
         response = chain.run(content=contents, query=que)
         match = re.search(r'(?<=[:\s])(\d+\.\d+|\d+)(?=\s|\b)', response)
+
         if match:
             key_values[que] = match.group()
+
     return key_values
 
-# Predict vulnerabilities based on extracted values
-def predict_vulnerability(values):
-    vulnerabilities = {}
-    vitamin_b12 = float(values.get("vitamin b12", 0))
-    rbc_count = float(values.get("RBC COUNT", 0))
-    platelet_count = float(values.get("PLATELET COUNT", 0))
-    thyroxine = float(values.get("THYROXINE", 0))
-    creatinine = float(values.get("CREATININE", 0))
-    bun = float(values.get("BLOOD UREA NITROGEN", 0))
-    uric_acid = float(values.get("URIC ACID", 0))
-    neutrophils = float(values.get("NEUTROPHILS", 0))
-    total_cholesterol = float(values.get("TOTAL CHOLESTEROL", 0))
-
-    if vitamin_b12 < 200 and rbc_count < 4.2:
-        vulnerabilities["Vitamin B12 Deficiency and Anemia"] = "High"
-    elif vitamin_b12 >= 200 and rbc_count >= 4.2 and platelet_count >= 150000:
-        vulnerabilities["Vitamin B12 Deficiency and Anemia"] = "Low"
-    else:
-        vulnerabilities["Vitamin B12 Deficiency and Anemia"] = "Moderate"
-
-    if thyroxine < 4.5:
-        vulnerabilities["Hypothyroidism"] = "High"
-    elif thyroxine > 11.2:
-        vulnerabilities["Hyperthyroidism"] = "High"
-    else:
-        vulnerabilities["Thyroid Dysfunction"] = "Low"
-
-    if creatinine > 1.2 or bun > 20:
-        vulnerabilities["Chronic Kidney Disease (CKD)"] = "High"
-    else:
-        vulnerabilities["Chronic Kidney Disease (CKD)"] = "Low"
-
-    if uric_acid > 6.8:
-        vulnerabilities["Gout"] = "High"
-    else:
-        vulnerabilities["Gout"] = "Low"
-
-    if neutrophils > 8000:
-        vulnerabilities["Infection"] = "High"
-    elif neutrophils < 1500:
-        vulnerabilities["Immune Deficiency"] = "High"
-    else:
-        vulnerabilities["Infection/Immune Status"] = "Normal"
-
-    if total_cholesterol > 240:
-        vulnerabilities["Cardiovascular Disease"] = "High"
-    elif total_cholesterol <= 200:
-        vulnerabilities["Cardiovascular Disease"] = "Low"
-    else:
-        vulnerabilities["Cardiovascular Disease"] = "Moderate"
-
-    return vulnerabilities
-
-# Generate vulnerability descriptions using Groq
-def generate_description(vulnerabilities):
-    llm = ChatGroq(
-        api_key= GROQ_API_KEY,
-        model="llama3-8b-8192"
-    )
+# Function to generate prediction
+def generate_prediction(vulnerabilities, llm):
     prompt_template = PromptTemplate(
-    input_variables=["content"],
-    template="""List each health vulnerability below in structured bulleted points. Include:  
+        input_variables=["content"],
+        template="""Given the following blood component's values, provide a description for each blood component first.
+        Then, as a separate part, predict whether the particular person's vulnerabilities to diseases which are related and dependent on one or more blood components listed in the content.
+        Provide the level of vulnerability as a separate part in a bullet point format.
+        Finally, give two to three line suggestions to reduce vulnerability in another bullet points format.
+        Return all results in structured format.
 
-        • Description of the condition  
-        • Vulnerability level  
-        • Suggested changes to reduce vulnerability  
-
-    Strictly present only the structured points without any introductory text.
-    {content}
-    """
+        {content}
+        """
     )
+    content = "\n".join([f"{key}: {value}" for key, value in vulnerabilities.items()])
+    formatted_prompt = prompt_template.format(content=content)
 
-    content = "\n".join([f"{disease}: {vulnerability}" for disease, vulnerability in vulnerabilities.items()])
     chain = LLMChain(llm=llm, prompt=prompt_template)
-    return chain.run(content=content)
+    description = chain.run(content=formatted_prompt)
+    stream_response(description)
+    return description
+
+
+def stream_response(response_text, chunk_size=15, delay=0.1):
+    start = 0
+    while start < len(response_text):
+        # Get the next chunk of text
+        chunk = response_text[start:start + chunk_size]
+        yield chunk
+        start += chunk_size
+        time.sleep(delay)
